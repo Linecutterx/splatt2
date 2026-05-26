@@ -34,8 +34,8 @@ Changing the pellet calibre in Settings instantly shifts all scoring bands — o
 
 ## Requirements
 
-- Windows 10 or 11 (64-bit)
-- **Python 3.9+** — download from https://python.org — tick **"Add Python to PATH"** during installation
+- Windows 10 or 11 (64-bit), macOS 12+, or a recent Linux distribution
+- **Python 3.9+** — download from https://python.org. On Windows, tick **"Add Python to PATH"** during installation. On macOS, `brew install python` works well. On Linux, install via your package manager (e.g. `sudo apt install python3 python3-venv python3-pip`).
 - A webcam (USB recommended for barrel-mounting; built-in works for testing)
 - A microphone (built-in laptop mic is fine for dry-fire; closer to the action is better for live fire)
 
@@ -43,13 +43,23 @@ Changing the pellet calibre in Settings instantly shifts all scoring bands — o
 
 ## Quick Start
 
+### Windows
 1. Install Python from https://python.org (tick "Add Python to PATH")
 2. Download or clone this repository
 3. Double-click **`RUN.bat`**
 
-That's it. `RUN.bat` automatically installs all Python dependencies (`numpy`, `opencv`, `sounddevice`, `Pillow`, `scipy`) the first time it runs, then launches Splatt2. On subsequent runs it checks for updates to dependencies and starts immediately.
+### macOS / Linux
+1. Install Python 3.9+ (`brew install python` on macOS, or your package manager on Linux)
+2. Download or clone this repository
+3. From a terminal in the project folder, run:
+   ```bash
+   ./run.sh
+   ```
+   On macOS you can also right-click `run.sh` → Open With → Terminal.
 
-> **To share with someone else:** give them the folder and tell them to install Python and double-click `RUN.bat`. No compilation, no installers, no antivirus drama.
+The launcher creates an isolated virtual environment in `.venv/` the first time it runs, installs all Python dependencies (`numpy`, `opencv`, `sounddevice`, `Pillow`, `scipy`), then launches Splatt2. Subsequent runs reuse the environment and start immediately.
+
+> **To share with someone else:** give them the folder. Windows users double-click `RUN.bat`; macOS / Linux users run `./run.sh`. No compilation, no installers, no antivirus drama.
 
 ---
 
@@ -121,7 +131,7 @@ Live camera feed with detected markers highlighted and the aim-point crosshair o
 
 Below the feed: a **◎ Focus assist** toggle (for manual-focus lenses) that reveals a live sharpness bar with peak-hold indicator — turn the focus ring until the bar peaks and shows green, then lock focus. Zero CPU cost when off.
 
-The **🎛 Cam Props** button (next to Settings) opens the Windows native camera properties dialog where you can adjust brightness, contrast, saturation, sharpness, and exposure directly via the driver. Increasing contrast and sharpness in this dialog significantly improves ArUco detection.
+The **🎛 Cam Props** button (next to Settings) opens the native camera properties dialog where you can adjust brightness, contrast, saturation, sharpness, and exposure directly via the driver. This is fully supported on Windows (DirectShow); on macOS and Linux it depends on the camera driver and may not be available. Increasing contrast and sharpness in this dialog significantly improves ArUco detection.
 
 The tracking quality bar shows what fraction of configured markers are visible:
 - **Green (>60%)** — all or most markers detected, full accuracy
@@ -300,11 +310,24 @@ Each `.csv` has a companion `.json` file with full trace data for the Series Rev
 - Try camera index 0, 1, 2 in Settings → Camera → Detect
 - Close other applications using the webcam
 - On Windows, check Camera privacy settings (Settings → Privacy → Camera)
+- On macOS, grant Camera and Microphone permission to your terminal app under System Settings → Privacy & Security
+- On Linux, ensure your user is in the `video` group (`sudo usermod -aG video $USER`, then log out and back in)
 
 **Dependencies fail to install**
 - Make sure Python 3.9+ is installed: open Command Prompt and type `python --version`
 - Try manually: `pip install opencv-python sounddevice numpy Pillow scipy`
 - Check your internet connection — pip downloads from pypi.org
+
+**`ModuleNotFoundError: No module named '_tkinter'`**
+
+Tkinter ships with Python but is split into a separate package on Homebrew and most Linux distros.
+- macOS (Homebrew): `brew install python-tk` (match your Python minor version if needed, e.g. `brew install python-tk@3.12`)
+- Debian/Ubuntu: `sudo apt install python3-tk`
+- Fedora: `sudo dnf install python3-tkinter`
+- Arch: `sudo pacman -S tk`
+- Or reinstall Python from https://www.python.org/downloads/ — the official installer always includes tkinter.
+
+After installing, delete the `.venv/` folder and run `./run.sh` again so the new Python is picked up.
 
 ---
 
@@ -313,7 +336,8 @@ Each `.csv` has a companion `.json` file with full trace data for the Series Rev
 ```
 splatt2/
 ├── main.py                  Entry point with crash logging
-├── RUN.bat                  Install dependencies & launch (double-click to run)
+├── RUN.bat                  Windows launcher (double-click to run)
+├── run.sh                   macOS / Linux launcher
 ├── requirements.txt         Python dependencies
 ├── targets/                 Target definition CSV files — add your own here
 │   ├── 10m_air_rifle.csv
