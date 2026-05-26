@@ -638,9 +638,13 @@ class SplattApp:
         except Exception:
             pass
         self._cam_var.set("Scanning...")
-        self.root.after(10, self._do_scan)
+        # Run the actual scan on a background thread — on macOS each
+        # OpenCV probe of a non-existent index can take hundreds of ms,
+        # which would freeze the Tk event loop if done on the main thread.
+        threading.Thread(target=self._do_scan_worker, daemon=True).start()
 
-    def _do_scan(self):
+    def _do_scan_worker(self):
+        """Background scan; posts results to the UI thread."""
         found = []
 
         # macOS: enumerate via AVFoundation so we don't trigger
@@ -682,6 +686,10 @@ class SplattApp:
 
         if not found:
             found = [(i, f"{i}: Camera {i}") for i in range(4)]
+        # Push results back to the UI thread
+        self.root.after(0, self._apply_scan_results, found)
+
+    def _apply_scan_results(self, found):
         self._cam_entries = {lbl: idx for idx, lbl in found}
         labels = [lbl for _, lbl in found]
         # Rebuild the OptionMenu's underlying menu
