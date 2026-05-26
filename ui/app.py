@@ -314,14 +314,29 @@ class SplattApp:
                         style="Quality.Horizontal.TProgressbar").pack(side="left", padx=4)
 
         # Camera selector
+        # Note: ttk.Combobox with state="readonly" has a long-standing freeze
+        # bug on macOS when the dropdown is opened. Use a tk.OptionMenu
+        # instead — it uses the native macOS popup and stays responsive.
         sf = tk.Frame(parent, bg=BG_PANEL)
         sf.pack(fill="x", padx=6, pady=(0, 2))
         tk.Label(sf, text="CAM", bg=BG_PANEL, fg=TEXT_DIM, font=FL).pack(side="left")
-        self._cam_var = tk.StringVar()
-        self._cam_combo = ttk.Combobox(sf, textvariable=self._cam_var,
-                                        state="readonly", width=22, font=FL)
+        self._cam_var = tk.StringVar(value="Scanning...")
+        self._cam_var.trace_add("write",
+            lambda *_: self._on_cam_selected())
+        self._cam_combo = tk.OptionMenu(sf, self._cam_var, "Scanning...")
+        self._cam_combo.config(bg=BG_CARD, fg=TEXT_PRI, font=FL,
+                               activebackground=ACCENT, activeforeground=BG_DARK,
+                               relief="flat", highlightthickness=0,
+                               width=22, anchor="w")
+        try:
+            # Style the popup menu to match the dark theme
+            self._cam_combo["menu"].config(
+                bg=BG_CARD, fg=TEXT_PRI, font=FL,
+                activebackground=ACCENT, activeforeground=BG_DARK,
+                relief="flat")
+        except Exception:
+            pass
         self._cam_combo.pack(side="left", padx=4)
-        self._cam_combo.bind("<<ComboboxSelected>>", self._on_cam_selected)
         _mk_btn(sf, "⟳", self._scan_cameras).pack(side="left")
         self.root.after(200, self._scan_cameras)
 
@@ -613,8 +628,15 @@ class SplattApp:
         threading.Thread(target=_worker, daemon=True).start()
 
     def _scan_cameras(self):
-        self._cam_combo.config(state="disabled")
-        self._cam_combo["values"] = ["Scanning..."]
+        # Disable the menu while scanning
+        try:
+            self._cam_combo.config(state="disabled")
+            menu = self._cam_combo["menu"]
+            menu.delete(0, "end")
+            menu.add_command(label="Scanning...",
+                             command=lambda: self._cam_var.set("Scanning..."))
+        except Exception:
+            pass
         self._cam_var.set("Scanning...")
         self.root.after(10, self._do_scan)
 
@@ -662,8 +684,14 @@ class SplattApp:
             found = [(i, f"{i}: Camera {i}") for i in range(4)]
         self._cam_entries = {lbl: idx for idx, lbl in found}
         labels = [lbl for _, lbl in found]
-        self._cam_combo["values"] = labels
-        self._cam_combo.config(state="readonly")
+        # Rebuild the OptionMenu's underlying menu
+        menu = self._cam_combo["menu"]
+        menu.delete(0, "end")
+        for lbl in labels:
+            menu.add_command(
+                label=lbl,
+                command=lambda v=lbl: self._cam_var.set(v))
+        self._cam_combo.config(state="normal")
         cur = self.cfg.get("camera_index", 0)
         for lbl in labels:
             if lbl.startswith(str(cur) + ":"):
