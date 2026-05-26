@@ -109,6 +109,55 @@ def _default_save_dir() -> str:
         return os.path.join(os.path.expanduser("~"), "Documents", "Splatt2")
 
 
+class _Invalidator:
+    """Event-driven UI redraw scheduler.
+
+    Callers (worker threads or UI handlers) call ``invalidate("region")``
+    when state changes, and a single drain runs on the Tk main thread
+    when the event loop is idle. Multiple invalidations of the same
+    region between drains coalesce into one redraw.
+
+    Using ``after_idle`` (rather than ``after(0)``) means user input —
+    menu popups, button clicks, resizes — always preempts redraws, so
+    the UI stays responsive even under heavy invalidation load.
+    """
+
+    def __init__(self, root: "tk.Tk", handlers: dict):
+        self._root = root
+        self._handlers = handlers           # name -> callable
+        self._dirty: set[str] = set()
+        self._scheduled = False
+        self._lock = threading.Lock()
+
+    def invalidate(self, *regions: str):
+        """Mark one or more regions dirty. Safe to call from any thread."""
+        with self._lock:
+            self._dirty.update(regions)
+            if self._scheduled:
+                return
+            self._scheduled = True
+        # after_idle is thread-safe in CPython Tk and yields to user input
+        try:
+            self._root.after_idle(self._drain)
+        except RuntimeError:
+            # Tk may be torn down already (during shutdown)
+            pass
+
+    def _drain(self):
+        with self._lock:
+            todo = self._dirty
+            self._dirty = set()
+            self._scheduled = False
+        for region in todo:
+            handler = self._handlers.get(region)
+            if handler is None:
+                continue
+            try:
+                handler()
+            except Exception as e:
+                print(f"[Invalidator] {region} handler error: {e}")
+
+
 class SplattApp:
     def __init__(self):
         self.cfg, self._first_run = load_config()
@@ -198,8 +247,21 @@ class SplattApp:
         self._editor_show_dur   = None
 
         self._build_window()   # creates self.root
-        # Start update loop — runs always, not just when camera active
-        self.root.after(100, self._update_loop)
+        # Event-driven UI invalidation. Handlers run on the Tk main thread
+        # via after_idle, so user input always preempts redraws.
+        self._inv = _Invalidator(self.root, {
+            "cam":     self._update_cam_display,
+            "target":  self._update_target_display,
+            "scores":  self._update_scores,
+            "audio":   self._update_audio_meter,
+            "status":  self._update_status_lights,
+        })
+        # Audio meter is decorative — drive it from a slow timer rather
+        # than the audio callback, which fires ~80×/s.
+        self.root.after(80, self._tick_audio_meter)
+        # Initial paint — render once now that widgets exist
+        self.root.after(50, lambda: self._inv.invalidate(
+            "target", "scores", "status"))
         # macOS-only: request camera/mic permission on a worker thread once
         # the window is visible, so the system prompts don't block the
         # event loop. No-op on other platforms.
@@ -282,6 +344,9 @@ class SplattApp:
         self._cam_label = tk.Label(parent, bg=BG_DARK, text="No camera",
                                    fg=TEXT_DIM, font=FH)
         self._cam_label.pack(fill="both", expand=True, padx=6, pady=4)
+        # Resize → re-rescale current frame
+        self._cam_label.bind("<Configure>",
+            lambda e: self._inv.invalidate("cam"))
 
         # Focus sharpness — toggle button + collapsible bar
         self._focus_active = False
@@ -358,6 +423,9 @@ class SplattApp:
         self._tgt_canvas = tk.Canvas(cf, bg=BG_DARK, highlightthickness=0, bd=0)
         self._tgt_canvas.pack(fill="both", expand=True)
         self._tgt_img_id = None
+        # Resize → rebuild renderer and redraw
+        self._tgt_canvas.bind("<Configure>",
+            lambda e: self._inv.invalidate("target"))
         self._tgt_canvas.create_text(200, 150,
             text="Start camera to begin tracking", fill=TEXT_DIM, font=FH, tags="ph")
 
@@ -753,7 +821,6 @@ class SplattApp:
         self._set_status("LIVE", ACCENT)
         self.audio.start()
         threading.Thread(target=self._camera_loop, daemon=True).start()
-        # _update_loop is already running (started at init); no need to restart
 
     def _stop_camera(self):
         self._running = False
@@ -896,6 +963,7 @@ class SplattApp:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                                 (80, 220, 80), 1, cv2.LINE_AA)
                     self._latest_cam_frame = disp
+                    self._inv.invalidate("cam", "target", "status")
                 ui_counter = 0
 
             try:
@@ -977,6 +1045,7 @@ class SplattApp:
             self.session.shots.remove(shot)
             self.root.after(0, lambda: self._set_status(
                 "Miss ignored (score 0)", TEXT_DIM))
+            self._inv.invalidate("scores", "target")
             return
         if shot is None:
             self.root.after(0, lambda: self._set_status(
@@ -992,6 +1061,7 @@ class SplattApp:
         _lbl = (f"Shot #{shot.index} (mark {mark_idx+1}): {sc_s} pts"
                 if mark_offsets else f"Shot #{shot.index}: {sc_s} pts")
         self.root.after(0, lambda lbl=_lbl, c=col: self._set_status(lbl, c))
+        self._inv.invalidate("scores", "target", "status")
 
 
     def _open_camera_properties(self):
@@ -1024,18 +1094,42 @@ class SplattApp:
         ))
 
     # =========================================================================
-    # UPDATE LOOP
+    # UI UPDATES
     # =========================================================================
 
-    def _update_loop(self):
-        # Target display and scores run always (even without camera)
-        # so colour changes / shot edits reflect immediately
-        self._update_target_display()
-        self._update_scores()
+    def _tick_audio_meter(self):
+        """Slow timer driving the audio level bar.
+
+        Audio chunks fire ~80×/s; pushing each one through the UI would
+        flood ``after_idle``. The meter is purely decorative, so a slow
+        12 fps tick is plenty. Only invalidates if the level changed.
+        """
         if self._running:
-            self._update_cam_display()
-            self._update_audio_meter()
-        self.root.after(33, self._update_loop)
+            level = min(1.0, self.audio.current_level * 12) * 100
+            if abs(level - getattr(self, "_audio_level_last", -1)) > 0.5:
+                self._audio_level_last = level
+                self._inv.invalidate("audio")
+        self.root.after(80, self._tick_audio_meter)
+
+    def _update_status_lights(self):
+        """Cheap status-only updates: on-target indicator, last-shot label."""
+        if self._on_target_status:
+            self._ontarget_lbl.config(text="● ON TARGET", fg=ACCENT)
+        elif self._in_approach_zone:
+            self._ontarget_lbl.config(text="◉ APPROACH", fg=GOLD)
+        else:
+            self._ontarget_lbl.config(text="○ OFF", fg=TEXT_DIM)
+
+        last = getattr(self, "_last_shot_info", None)
+        if last and isinstance(last, Shot):
+            sc = last.score
+            sc_str = f"{sc:.1f}" if sc != int(sc) else str(int(sc))
+            acp = last.aim_centrepoint
+            acp_s = f" ACP({acp[0]:+.1f},{acp[1]:+.1f})" if acp else ""
+            ot_s  = f" {last.on_target_duration_s:.1f}s"
+            self._last_shot_lbl.config(
+                text=f"#{last.index} {sc_str}pts ({last.aim_mm[0]:+.1f},{last.aim_mm[1]:+.1f}){acp_s}{ot_s}",
+                fg=GOLD if sc >= 9 else (ACCENT if sc >= 7 else TEXT_SEC))
 
     def _update_cam_display(self):
         frame = self._latest_cam_frame
@@ -1183,26 +1277,6 @@ class SplattApp:
 
         self._refresh_shot_log()
 
-        # On-target indicator
-        if self._on_target_status:
-            self._ontarget_lbl.config(text="● ON TARGET", fg=ACCENT)
-        elif self._in_approach_zone:
-            self._ontarget_lbl.config(text="◉ APPROACH", fg=GOLD)
-        else:
-            self._ontarget_lbl.config(text="○ OFF", fg=TEXT_DIM)
-
-        # Last shot
-        last = getattr(self, "_last_shot_info", None)
-        if last and isinstance(last, Shot):
-            sc = last.score
-            sc_str = f"{sc:.1f}" if sc != int(sc) else str(int(sc))
-            acp = last.aim_centrepoint
-            acp_s = f" ACP({acp[0]:+.1f},{acp[1]:+.1f})" if acp else ""
-            ot_s  = f" {last.on_target_duration_s:.1f}s"
-            self._last_shot_lbl.config(
-                text=f"#{last.index} {sc_str}pts ({last.aim_mm[0]:+.1f},{last.aim_mm[1]:+.1f}){acp_s}{ot_s}",
-                fg=GOLD if sc >= 9 else (ACCENT if sc >= 7 else TEXT_SEC))
-
     def _refresh_shot_log(self):
         log = self._shot_log
         log.config(state="normal")
@@ -1269,6 +1343,7 @@ class SplattApp:
         if hasattr(self, "_zoom_lbl"):
             self._zoom_lbl.config(text=f"{self._zoom_factor:.2f}×")
         self.target_renderer = None   # force rebuild on next frame
+        self._inv.invalidate("target")
 
     def _on_thresh_change(self, val=None):
         v = self._thresh_var.get()
@@ -1292,6 +1367,7 @@ class SplattApp:
         else:
             btn.config(text="❙❙  Pause", bg=BG_CARD, fg=TEXT_SEC)
             self._set_status("LIVE" if self._running else "READY", ACCENT)
+        self._inv.invalidate("target")
 
     def _save_zero_offset(self):
         """Persist zero offset to config file so it survives restarts."""
@@ -1370,6 +1446,7 @@ class SplattApp:
             text="DEC ON"  if self._decimal_scoring else "DEC OFF",
             bg=ACCENT if self._decimal_scoring else BG_CARD,
             fg=BG_DARK if self._decimal_scoring else TEXT_SEC)
+        self._inv.invalidate("scores")
 
     def _cycle_rotation(self):
         """Cycle camera rotation: 0 → 90 → 180 → 270 → 0."""
@@ -1385,26 +1462,31 @@ class SplattApp:
         self._show_acp = not self._show_acp
         self._btn_acp.config(bg=ACCENT if self._show_acp else BG_CARD,
                               fg=BG_DARK if self._show_acp else TEXT_SEC)
+        self._inv.invalidate("target")
 
     def _toggle_bbox_shots(self):
         self._show_bbox_shots = not self._show_bbox_shots
         self._btn_bbox_s.config(bg=ACCENT if self._show_bbox_shots else BG_CARD,
                                  fg=BG_DARK if self._show_bbox_shots else TEXT_SEC)
+        self._inv.invalidate("target", "scores")
 
     def _toggle_bbox_acp(self):
         self._show_bbox_acp = not self._show_bbox_acp
         self._btn_bbox_a.config(bg=ACCENT if self._show_bbox_acp else BG_CARD,
                                  fg=BG_DARK if self._show_bbox_acp else TEXT_SEC)
+        self._inv.invalidate("target", "scores")
 
     def _toggle_dot_mode(self):
         self._shot_dot_only = not self._shot_dot_only
         self._btn_dot.config(bg=ACCENT if self._shot_dot_only else BG_CARD,
                               fg=BG_DARK if self._shot_dot_only else TEXT_SEC)
+        self._inv.invalidate("target")
 
     def _toggle_group(self):
         self._show_group = not self._show_group
         self._btn_group.config(bg=ACCENT if self._show_group else BG_CARD,
                                 fg=BG_DARK if self._show_group else TEXT_SEC)
+        self._inv.invalidate("target")
 
     def _undo_shot(self):
         shot = self.session.undo_last_shot()
@@ -1413,6 +1495,7 @@ class SplattApp:
             self._selected_shot = None
             self._highlighted_trace = None
             self._last_shot_lbl.config(text=f"Undid shot #{shot.index}", fg=GOLD)
+            self._inv.invalidate("scores", "target", "status")
 
     def _delete_selected_shot(self):
         if not self._selected_shot:
@@ -1428,6 +1511,7 @@ class SplattApp:
                 pass
             self._selected_shot = None
             self._highlighted_trace = None
+            self._inv.invalidate("scores", "target")
 
     def _start_series(self):
         """Open the live CSV file and begin accepting shots."""
@@ -1479,6 +1563,7 @@ class SplattApp:
         self._selected_shot = None
         self._highlighted_trace = None
         self._set_status("READY — press Start Series", TEXT_SEC)
+        self._inv.invalidate("scores", "target")
 
     def _reset_all(self):
         if messagebox.askyesno("Reset", "Clear all shots and restart?"):
@@ -1499,6 +1584,7 @@ class SplattApp:
             self._last_shot_lbl.config(text="Last shot: —", fg=TEXT_SEC)
             self._set_status("READY — press Start Series", TEXT_SEC)
             self._exit_series_editor()
+            self._inv.invalidate("scores", "target", "status")
 
     def _print_markers(self):
         MarkerSheetDialog(self.root, self.cfg)
@@ -1581,6 +1667,7 @@ class SplattApp:
             self._set_status("Restarting camera with new settings…", GOLD)
             self._stop_camera()
             self.root.after(600, self._start_camera)
+        self._inv.invalidate("target", "scores", "status")
 
     def _apply_session_cfg(self):
         """Push config values into the live session object."""
