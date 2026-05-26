@@ -3,3 +3,7 @@ opencv-python>=4.7
 sounddevice>=0.4.6
 Pillow>=9.0
 scipy>=1.9
+
+# macOS only: lets us request camera and microphone permissions up front
+# instead of silently failing the first time the user starts the camera.
+pyobjc-framework-AVFoundation>=10.0; sys_platform == "darwin"

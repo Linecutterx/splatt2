@@ -310,7 +310,7 @@ Each `.csv` has a companion `.json` file with full trace data for the Series Rev
 - Try camera index 0, 1, 2 in Settings → Camera → Detect
 - Close other applications using the webcam
 - On Windows, check Camera privacy settings (Settings → Privacy → Camera)
-- On macOS, grant Camera and Microphone permission to your terminal app under System Settings → Privacy & Security
+- On macOS, the app prompts for Camera and Microphone access on first launch. If you denied them or the prompt didn't appear, open System Settings → Privacy & Security → Camera (and Microphone) and grant access to the app you used to launch Splatt2 (Terminal, iTerm, or your IDE), then restart.
 - On Linux, ensure your user is in the `video` group (`sudo usermod -aG video $USER`, then log out and back in)
 
 **Dependencies fail to install**
@@ -350,6 +350,7 @@ splatt2/
 │   ├── session.py           Shot data, trace recording, file I/O
 │   ├── target_renderer.py   OpenCV target canvas drawing
 │   ├── marker_sheet.py      Printable ArUco sheet generator
+│   ├── permissions.py       macOS camera/mic permission preflight
 │   └── smoother.py          Aim-point smoothing (EMA / Savitzky-Golay)
 └── ui/
     └── app.py               Main tkinter UI

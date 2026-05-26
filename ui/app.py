@@ -30,6 +30,44 @@ from core.target_renderer import TargetRenderer
 from core.marker_sheet import generate_marker_sheet
 from core.smoother import make_smoother
 
+# ── OS-specific OpenCV camera backend ─────────────────────────────────────────
+# DirectShow is Windows-only; on macOS/Linux it produces noisy errors and a
+# silent fallback. Picking the right backend per platform makes camera open
+# faster and cleans up logs.
+if sys.platform.startswith("win"):
+    _CAM_BACKEND = cv2.CAP_DSHOW
+elif sys.platform == "darwin":
+    _CAM_BACKEND = cv2.CAP_AVFOUNDATION
+elif sys.platform.startswith("linux"):
+    _CAM_BACKEND = cv2.CAP_V4L2
+else:
+    _CAM_BACKEND = cv2.CAP_ANY
+
+
+def _open_camera(idx: int):
+    """Open a camera by index using the OS-preferred backend, with a quiet
+    fallback to the default backend. OpenCV warns about non-existent indices;
+    we suppress those during fallback since the caller checks ``isOpened()``.
+    """
+    cap = cv2.VideoCapture(idx, _CAM_BACKEND)
+    if cap.isOpened():
+        return cap
+    cap.release()
+    _prev = None
+    try:
+        _prev = cv2.utils.logging.getLogLevel()
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+    except Exception:
+        pass
+    try:
+        return cv2.VideoCapture(idx)
+    finally:
+        if _prev is not None:
+            try:
+                cv2.utils.logging.setLogLevel(_prev)
+            except Exception:
+                pass
+
 # ── Palette ───────────────────────────────────────────────────────────────────
 BG_DARK  = "#0f0f13"
 BG_MID   = "#16161d"
@@ -555,15 +593,44 @@ class SplattApp:
 
     def _do_scan(self):
         found = []
-        for i in range(8):
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            if cap.isOpened():
-                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                found.append((i, f"{i}: Camera {i}  ({w}x{h})"))
-                cap.release()
-            else:
-                cap.release()
+
+        # macOS: enumerate via AVFoundation so we don't trigger
+        # "out device of bound" warnings for non-existent indices.
+        if sys.platform == "darwin":
+            try:
+                from core.permissions import list_video_devices
+                devices = list_video_devices()
+            except Exception:
+                devices = None
+            if devices is not None:
+                for idx, name in devices:
+                    found.append((idx, f"{idx}: {name}"))
+
+        # Fallback: probe with OpenCV. Suppress its log spam while we do —
+        # opening a non-existent index is normal during enumeration.
+        if not found:
+            _prev_lvl = None
+            try:
+                _prev_lvl = cv2.utils.logging.getLogLevel()
+                cv2.utils.logging.setLogLevel(
+                    cv2.utils.logging.LOG_LEVEL_SILENT)
+            except Exception:
+                pass
+            try:
+                for i in range(8):
+                    cap = cv2.VideoCapture(i, _CAM_BACKEND)
+                    if cap.isOpened():
+                        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        found.append((i, f"{i}: Camera {i}  ({w}x{h})"))
+                    cap.release()
+            finally:
+                if _prev_lvl is not None:
+                    try:
+                        cv2.utils.logging.setLogLevel(_prev_lvl)
+                    except Exception:
+                        pass
+
         if not found:
             found = [(i, f"{i}: Camera {i}") for i in range(4)]
         self._cam_entries = {lbl: idx for idx, lbl in found}
@@ -592,9 +659,7 @@ class SplattApp:
             self._stop_camera()
             return
         idx = self.cfg.get("camera_index", 0)
-        self._cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-        if not self._cap.isOpened():
-            self._cap = cv2.VideoCapture(idx)
+        self._cap = _open_camera(idx)
         if not self._cap.isOpened():
             messagebox.showerror("Camera Error",
                                   f"Cannot open camera {idx}. Try another index.")
@@ -3201,9 +3266,7 @@ class SettingsDialog(tk.Toplevel):
         self._cam_caps_lbl.config(text="Probing…")
         self.update()
         import cv2 as _cv2
-        cap = _cv2.VideoCapture(idx, _cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            cap = _cv2.VideoCapture(idx)
+        cap = _open_camera(idx)
         if not cap.isOpened():
             self._cam_caps_lbl.config(text="Not found")
             return
