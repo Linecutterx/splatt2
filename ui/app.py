@@ -200,6 +200,10 @@ class SplattApp:
         self._build_window()   # creates self.root
         # Start update loop — runs always, not just when camera active
         self.root.after(100, self._update_loop)
+        # macOS-only: request camera/mic permission on a worker thread once
+        # the window is visible, so the system prompts don't block the
+        # event loop. No-op on other platforms.
+        self.root.after(500, self._request_permissions_async)
         # First-run wizard — shown after window is ready
         if self._first_run:
             self.root.after(300, self._show_first_run_wizard)
@@ -584,6 +588,29 @@ class SplattApp:
     # =========================================================================
     # CAMERA
     # =========================================================================
+
+    def _request_permissions_async(self):
+        """macOS only: request camera/mic permission off the UI thread.
+
+        AVFoundation's request shows a system dialog and the completion
+        handler can take seconds; doing it on the Tk thread freezes the UI.
+        """
+        if sys.platform != "darwin":
+            return
+
+        def _worker():
+            try:
+                from core.permissions import (
+                    request_av_permissions, warn_if_denied)
+                perms = request_av_permissions()
+                msg = warn_if_denied(perms)
+                if msg:
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        "Splatt2 — Permissions", msg))
+            except Exception as e:
+                print(f"[Permissions] preflight skipped: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _scan_cameras(self):
         self._cam_combo.config(state="disabled")

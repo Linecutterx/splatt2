@@ -33,27 +33,6 @@ def _write_crash_log(exc_text: str):
 
 def main():
     print("Starting Splatt2...")
-    # On macOS, surface camera and microphone permission prompts at startup
-    # rather than letting them appear silently when the user hits "Start
-    # Camera". No-op on Windows and Linux.
-    try:
-        from core.permissions import request_av_permissions, warn_if_denied
-        perms = request_av_permissions()
-        msg = warn_if_denied(perms)
-        if msg:
-            try:
-                import tkinter as tk
-                from tkinter import messagebox
-                _r = tk.Tk()
-                _r.withdraw()
-                messagebox.showwarning("Splatt2 — Permissions", msg)
-                _r.destroy()
-            except Exception:
-                print(f"[Permissions] {msg}")
-    except Exception as e:
-        # Permission helper must never block app startup
-        print(f"[Permissions] preflight skipped: {e}")
-
     from ui.app import SplattApp
     app = SplattApp()
     app.run()
