@@ -4,9 +4,11 @@ Cross-platform PyInstaller build of Splatt2 for the host OS.
 
 ## Prerequisites
 
+```sh
+uv sync --frozen --group build
 ```
-pip install -r requirements.txt -r requirements-build.txt
-```
+
+This installs both the runtime dependencies and the `build` group (PyInstaller and its hooks). uv is bootstrapped automatically by `RUN.bat` / `run.sh` if you don't already have it; otherwise install from <https://docs.astral.sh/uv/>.
 
 Platform notes:
 
@@ -17,9 +19,9 @@ Platform notes:
 
 ## Build
 
-```
-python build/build.py            # build for the current OS
-python build/build.py --clean    # delete dist/ and build cache first
+```sh
+uv run python build/build.py             # build for the current OS
+uv run python build/build.py --clean     # delete dist/ and build cache first
 ```
 
 Output:

@@ -37,7 +37,8 @@ Changing the pellet calibre in Settings instantly shifts all scoring bands — o
 - Windows 10/11, macOS 12+, or a recent 64-bit Linux desktop
 - A webcam (USB recommended for barrel-mounting; built-in works for testing)
 - A microphone (built-in laptop mic is fine for dry-fire; closer to the action is better for live fire)
-- **Python 3.9+** is only needed when running from source — pre-built binaries bundle their own runtime
+
+Running from source uses [uv](https://docs.astral.sh/uv/) to manage Python and dependencies — the launcher installs uv on first run if it isn't already present, so no manual Python install is needed.
 
 ---
 
@@ -69,13 +70,12 @@ Override with `SPLATT2_USER_DIR=/some/path` for testing or portable installs.
 
 ## Quick Start (run from source)
 
-1. Install Python 3.9+ from https://python.org (Windows: tick **"Add Python to PATH"**)
-2. Clone or download this repository
-3. Launch:
-   - **Windows** — double-click `RUN.bat`
-   - **macOS / Linux** — `pip install -r requirements.txt && python main.py`
+Clone or download this repository, then:
 
-`RUN.bat` installs the Python deps (`numpy`, `opencv`, `sounddevice`, `Pillow`, `scipy`) on first run, then starts the app.
+- **Windows** — double-click `RUN.bat`
+- **macOS / Linux** — `./run.sh`
+
+The launcher installs uv if needed, syncs the locked environment from `uv.lock`, and starts the app. First run takes a minute; subsequent runs start in seconds.
 
 ---
 
@@ -341,9 +341,10 @@ Each `.csv` has a companion `.json` file with full trace data for the Series Rev
 ```
 splatt2/
 ├── main.py                  Entry point with crash logging
-├── RUN.bat                  Install dependencies & launch (Windows dev flow)
-├── requirements.txt         Runtime Python dependencies
-├── requirements-build.txt   Build-time dependencies (PyInstaller)
+├── RUN.bat                  Bootstrap uv and launch (Windows)
+├── run.sh                   Bootstrap uv and launch (macOS/Linux)
+├── pyproject.toml           Project metadata and runtime dependencies
+├── uv.lock                  Locked, reproducible dependency versions
 ├── targets/                 Bundled target definition CSVs (read-only seeds)
 │   ├── 10m_air_rifle.csv
 │   ├── 10m_air_pistol.csv
@@ -370,13 +371,54 @@ splatt2/
 
 ---
 
+## Development
+
+Splatt2 uses [uv](https://docs.astral.sh/uv/) for Python and dependency management. The launchers (`RUN.bat`, `run.sh`) bootstrap uv on first run, so you don't need to install it manually unless you want to work with uv directly.
+
+### Common commands
+
+```sh
+uv sync                          # create .venv and install everything in uv.lock
+uv sync --frozen                 # like sync, but fail if the lock is out of date
+uv run python main.py            # run the app inside the project venv
+uv run python -m py_compile core/*.py ui/*.py    # syntax check
+uv add <pkg>                     # add a runtime dependency
+uv add --dev <pkg>               # add a dev-only dependency
+uv lock --upgrade                # refresh uv.lock to latest compatible versions
+uv export -o requirements.txt    # produce a flat requirements file if needed
+```
+
+`uv run` automatically syncs `.venv` against `uv.lock` before executing, so you rarely need to call `uv sync` explicitly.
+
+### Updating dependencies
+
+1. Bump the version constraint in `pyproject.toml` (or run `uv add <pkg>`)
+2. `uv lock` to refresh `uv.lock`
+3. `uv run python main.py` to confirm the app still starts
+4. Commit `pyproject.toml` and `uv.lock` together
+
+### Contributing checks
+
+Before raising a pull request:
+
+- Syntax check: `uv run python -m py_compile core/*.py ui/*.py main.py`
+- Smoke test: `uv run python main.py`
+
+A few guidelines:
+
+- Target definitions belong in `targets/*.csv` — no hardcoded ring values in Python
+- Scoring logic lives in `core/tracker.py:score_shot()` — keep it geometry-only
+- UI code is in `ui/app.py` — it's large but structured into clear method groups
+
+---
+
 ## Building from Source
 
 To produce a standalone bundle for your platform:
 
-```
-pip install -r requirements.txt -r requirements-build.txt
-python build/build.py --clean
+```sh
+uv sync --frozen --group build
+uv run python build/build.py --clean
 ```
 
 Output lands in `dist/splatt2-<os>-<arch>/`. See [`build/README.md`](build/README.md) for per-OS notes.
@@ -399,16 +441,6 @@ Manual-dispatch releases are flagged as pre-releases so they don't override the 
 ## Changelog
 
 See `CHANGELOG.md` for a full history of changes since the initial release.
-
-## Contributing
-
-Pull requests welcome. A few guidelines:
-
-- Target definitions belong in `targets/*.csv` — no hardcoded ring values in Python
-- Scoring logic lives in `core/tracker.py:score_shot()` — keep it geometry-only
-- UI code is in `ui/app.py` — it's large but structured into clear method groups
-- Run a syntax check before submitting: `python -m py_compile core/*.py ui/*.py`
-- Test with `python main.py` before raising a pull request
 
 ---
 
