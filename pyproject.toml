@@ -1,0 +1,17 @@
+[project]
+name = "splatt2"
+version = "1.1.0"
+description = "Computer-vision dry-fire and live-fire training tool for air rifle and air pistol."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.7",
+    "sounddevice>=0.4.6",
+    "Pillow>=9.0",
+    "scipy>=1.9",
+]
+
+[tool.uv]
+package = false

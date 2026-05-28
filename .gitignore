@@ -5,6 +5,9 @@ __pycache__/
 *.pyd
 *.egg-info/
 
+# uv / virtualenvs
+.venv/
+
 # App-generated files
 splatt2_config.json
 splatt2_crash.log
