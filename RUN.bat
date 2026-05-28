@@ -3,30 +3,31 @@ setlocal EnableDelayedExpansion
 
 echo.
 echo  ============================================
-echo    SPLATT2 — Target Shooting Trainer
+echo    SPLATT2 - Target Shooting Trainer
 echo  ============================================
 echo.
 
-REM ── Check Python is available ────────────────────────────────────────────
-python --version >nul 2>&1
+REM Bootstrap uv if missing. uv manages Python and dependencies for us;
+REM users no longer need to install Python first.
+where uv >nul 2>&1
 if errorlevel 1 (
-    echo  [ERROR] Python not found.
-    echo.
-    echo  Please install Python 3.9 or later from:
-    echo    https://www.python.org/downloads/
-    echo.
-    echo  During installation, tick "Add Python to PATH".
-    echo.
-    pause
-    exit /b 1
+    echo  uv not found. Installing it now...
+    powershell -ExecutionPolicy ByPass -NoProfile -Command ^
+        "irm https://astral.sh/uv/install.ps1 | iex"
+    if errorlevel 1 (
+        echo.
+        echo  [ERROR] Could not install uv automatically.
+        echo  Install it manually from https://docs.astral.sh/uv/ and try again.
+        echo.
+        pause
+        exit /b 1
+    )
+    REM PATH only updates in new shells, so use the installer's default location.
+    set "PATH=%USERPROFILE%\.local\bin;%PATH%"
 )
 
-for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PYVER=%%v
-echo  Python %PYVER% found.
-
-REM ── Install / update dependencies (fast if already installed) ────────────
-echo  Checking dependencies...
-pip install -q -r requirements.txt
+echo  Syncing dependencies (first run only takes a minute)...
+uv sync --frozen
 if errorlevel 1 (
     echo.
     echo  [ERROR] Could not install dependencies.
@@ -36,16 +37,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ── Launch ───────────────────────────────────────────────────────────────
 echo  Starting Splatt2...
 echo.
-python main.py
+uv run python main.py
 if errorlevel 1 (
     echo.
     echo  [ERROR] Splatt2 exited with an error.
-    if exist splatt2_crash.log (
-        echo  Crash details saved to: splatt2_crash.log
-    )
+    echo  Crash details, if any, are saved to the user data directory
+    echo  printed in the console output above.
     echo.
     pause
 )
