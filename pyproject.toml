@@ -1,7 +1,7 @@
 [project]
 name = "splatt2"
 version = "1.1.0"
-description = "Computer-vision dry-fire and live-fire training tool for air rifle and air pistol."
+description = "Computer-vision dry-fire and live-fire training tool for rifle and pistol."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
