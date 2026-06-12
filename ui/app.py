@@ -125,6 +125,7 @@ class SplattApp:
             clahe_clip=float(self.cfg.get("clahe_clip", 4.0)),
             marker_count=int(self.cfg.get("aruco_marker_count", 4)),
             brightness_target=float(self.cfg.get("brightness_target", 128.0)),
+            sharpen=float(self.cfg.get("sharpen", 0.0)),
         )
         self.target_renderer = None
 
@@ -167,6 +168,14 @@ class SplattApp:
         self._zero_mode = False
         self._decimal_scoring = self.cfg.get("decimal_scoring", False)
         self._zoom_factor = 1.0
+        # Digital zoom on the captured frame: crops the centre of each
+        # frame before detection so distant marker sheets get more
+        # pixels per marker. 1.0 means no crop.
+        self._cam_zoom = float(self.cfg.get("camera_zoom", 1.0))
+        # Diagnostic mode: when on, the camera preview shows the
+        # greyscale frame the ArUco detector actually sees (after
+        # gain, CLAHE and sharpen) instead of the raw BGR feed.
+        self._show_processed = False
         self._live_fps = 0.0
         self._sharpness = 0.0
         self._sharpness_peak = 0.0
@@ -294,6 +303,10 @@ class SplattApp:
                                      self._focus_active,
                                      self._toggle_focus_assist)
         self._btn_focus.pack(side="left")
+        self._btn_processed = _mk_toggle(
+            ff_btn, "◧ Tracker view",
+            self._show_processed, self._toggle_processed_view)
+        self._btn_processed.pack(side="left", padx=(4, 0))
 
         self._focus_frame = tk.Frame(parent, bg=BG_PANEL)
         # Not packed yet — shown only when active
@@ -314,6 +327,22 @@ class SplattApp:
         self._quality_var = tk.DoubleVar()
         ttk.Progressbar(qf, variable=self._quality_var, maximum=100, length=160,
                         style="Quality.Horizontal.TProgressbar").pack(side="left", padx=4)
+
+        # Camera digital zoom (centre crop). Useful when the target
+        # sheet is far from the camera and markers are too small for
+        # ArUco to detect reliably.
+        zf = tk.Frame(parent, bg=BG_PANEL)
+        zf.pack(fill="x", padx=6, pady=(0, 2))
+        tk.Label(zf, text="ZOOM", bg=BG_PANEL, fg=TEXT_DIM,
+                 font=FL).pack(side="left")
+        self._cam_zoom_var = tk.DoubleVar(value=self._cam_zoom)
+        ttk.Scale(zf, from_=1.0, to=8.0, variable=self._cam_zoom_var,
+                  orient="horizontal", length=140,
+                  command=self._on_cam_zoom_change).pack(side="left", padx=4)
+        self._cam_zoom_lbl = tk.Label(
+            zf, text=f"{self._cam_zoom:.1f}×", bg=BG_PANEL, fg=ACCENT,
+            font=("Consolas", 9), width=5)
+        self._cam_zoom_lbl.pack(side="left")
 
         # Camera selector
         sf = tk.Frame(parent, bg=BG_PANEL)
@@ -771,15 +800,17 @@ class SplattApp:
         UI thread blocks while the loop is mid-``cap.read()``.
 
         - BUFFERSIZE=1 means cap.read() always returns the freshest frame
-        - Frame is downscaled to max 480p for ArUco detection regardless of
-          capture resolution — this is the single biggest speed gain
+        - Frame is downscaled to a configurable cap for ArUco detection
+          (default 640x480). At long range this can be raised so markers
+          keep enough pixels per side to be detected reliably.
         - UI preview is only updated every N frames to save tkinter overhead
         - 'no_video_mode': skip annotated frame entirely, pure tracking only
         """
         no_video = self.cfg.get("no_video_mode", False)
         ui_every = 3
         ui_counter = 0
-        detect_w, detect_h = 640, 480
+        detect_w = int(self.cfg.get("detection_max_width", 640))
+        detect_h = int(self.cfg.get("detection_max_height", 480))
         fps = _FpsCounter()
 
         try:
@@ -796,6 +827,8 @@ class SplattApp:
                 rotation = _ROTATION_FLAGS.get(self._camera_rotation)
                 if rotation is not None:
                     frame = cv2.rotate(frame, rotation)
+                if self._cam_zoom > 1.001:
+                    frame = self._apply_camera_zoom(frame, self._cam_zoom)
 
                 small = self._downscale_for_detection(frame, detect_w, detect_h)
                 if self._focus_active:
@@ -814,7 +847,11 @@ class SplattApp:
 
                 ui_counter += 1
                 if not no_video and ui_counter >= ui_every:
-                    self._publish_camera_frame(result.frame_display, self._live_fps)
+                    if self._show_processed and result.processed is not None:
+                        preview = result.processed
+                    else:
+                        preview = result.frame_display
+                    self._publish_camera_frame(preview, self._live_fps)
                     ui_counter = 0
 
                 self._drain_shot_queue()
@@ -837,6 +874,21 @@ class SplattApp:
             frame, (int(fw * scale), int(fh * scale)),
             interpolation=cv2.INTER_LINEAR,
         )
+
+    @staticmethod
+    def _apply_camera_zoom(frame, zoom: float):
+        """Centre-crop ``frame`` so it occupies ``1/zoom`` of each axis.
+
+        This is digital zoom: the cropped region is returned as-is and
+        downstream stages (resize for detection, draw, present) operate
+        on a smaller frame with proportionally larger marker pixels.
+        """
+        fh, fw = frame.shape[:2]
+        cw = max(1, int(fw / zoom))
+        ch = max(1, int(fh / zoom))
+        x0 = (fw - cw) // 2
+        y0 = (fh - ch) // 2
+        return frame[y0:y0 + ch, x0:x0 + cw]
 
     @staticmethod
     def _measure_sharpness(frame) -> float:
@@ -1337,12 +1389,29 @@ class SplattApp:
             self._btn_focus.config(text="◎ Focus assist: OFF")
         _set_toggle(self._btn_focus, self._focus_active)
 
+    def _toggle_processed_view(self):
+        """Toggle showing the post-processed (tracker view) frame.
+
+        Helpful for tuning CLAHE, sharpen and zoom: the preview shows
+        exactly what the ArUco detector receives, so you can see if a
+        marker is washed out, soft, or split by uneven lighting.
+        """
+        self._show_processed = not self._show_processed
+        _set_toggle(self._btn_processed, self._show_processed)
+
     def _on_zoom_change(self, val=None):
         """Zoom slider changed — rebuild renderer at new scale."""
         self._zoom_factor = round(float(self._zoom_var.get()), 2)
         if hasattr(self, "_zoom_lbl"):
             self._zoom_lbl.config(text=f"{self._zoom_factor:.2f}×")
         self.target_renderer = None   # force rebuild on next frame
+
+    def _on_cam_zoom_change(self, _val=None):
+        """Camera digital-zoom slider changed."""
+        self._cam_zoom = round(float(self._cam_zoom_var.get()), 1)
+        self._cam_zoom_lbl.config(text=f"{self._cam_zoom:.1f}×")
+        self.cfg["camera_zoom"] = self._cam_zoom
+        save_config(self.cfg)
 
     def _on_thresh_change(self, val=None):
         v = self._thresh_var.get()
@@ -1648,6 +1717,7 @@ class SplattApp:
                 marker_count=int(self.cfg.get("aruco_marker_count", 4)),
                 brightness_target=float(
                     self.cfg.get("brightness_target", 128.0)),
+                sharpen=float(self.cfg.get("sharpen", 0.0)),
             )
 
         self._camera_rotation = int(self.cfg.get("camera_rotation", 0))
@@ -3395,6 +3465,17 @@ class SeriesReviewWindow(tk.Toplevel):
         self._dot_only    = tk.BooleanVar(value=False)
         self._show_group  = tk.BooleanVar(value=False)
 
+        # Trace player state. ``_player_mode`` toggles between the
+        # checkbox-driven viewer (default) and the per-shot replay
+        # player; ``_player_pos`` is the playhead in seconds.
+        self._player_mode = False
+        self._player_shot = None
+        self._player_pos = 0.0
+        self._player_speed = 1.0
+        self._player_playing = False
+        self._player_after_id = None
+        self._player_last_tick = 0.0
+
         self.title("Series Review — Splatt2")
         self.configure(bg=BG_DARK)
         self.geometry("1200x750")
@@ -3537,12 +3618,83 @@ class SeriesReviewWindow(tk.Toplevel):
         def _wheel(e):
             self._list_canvas.yview_scroll(int(-1*(e.delta/120)), "units")
         self._list_canvas.bind("<MouseWheel>", _wheel)
+
+        self._build_trace_player(parent)
+
         bf = tk.Frame(parent, bg=BG_PANEL)
         bf.pack(fill="x", padx=6, pady=(0, 6))
         _mk_btn(bf, "▶  Next Series", self._next_series,
                 accent=True).pack(fill="x", pady=1)
         _mk_btn(bf, "💾  Save CSV", self._save).pack(fill="x", pady=1)
         _mk_btn(bf, "✕  Close", self._on_close).pack(fill="x", pady=1)
+
+    def _build_trace_player(self, parent):
+        """Build the per-shot trace replay panel.
+
+        The card has two modes:
+
+        - **View** (default): the regular review behaviour with the
+          shot-list checkboxes deciding which traces are drawn.
+        - **Play**: focuses on a single shot, lets the user scrub
+          through its sampled aim trace or play it back at a chosen
+          speed. Other shots are hidden while in this mode.
+        """
+        pc = tk.Frame(parent, bg=BG_CARD)
+        pc.pack(fill="x", padx=6, pady=(0, 4))
+
+        hdr = tk.Frame(pc, bg=BG_CARD)
+        hdr.pack(fill="x", padx=8, pady=(4, 2))
+        tk.Label(hdr, text="TRACE PLAYER", bg=BG_CARD, fg=TEXT_DIM,
+                 font=FL).pack(side="left")
+        self._player_mode_btn = _mk_chip(
+            hdr, "Play mode: OFF", self._toggle_player_mode)
+        self._player_mode_btn.pack(side="right")
+
+        # Body holds all the playback controls. It is hidden whenever
+        # the player is in View mode so the panel stays compact.
+        self._player_body = tk.Frame(pc, bg=BG_CARD)
+
+        sel = tk.Frame(self._player_body, bg=BG_CARD)
+        sel.pack(fill="x", padx=6, pady=(0, 2))
+        tk.Label(sel, text="Shot:", bg=BG_CARD, fg=TEXT_DIM,
+                 font=FL).pack(side="left")
+        self._player_shot_var = tk.StringVar()
+        self._player_shot_combo = ttk.Combobox(
+            sel, textvariable=self._player_shot_var,
+            state="readonly", width=12, font=FL)
+        self._player_shot_combo.pack(side="left", padx=4)
+        self._player_shot_combo.bind(
+            "<<ComboboxSelected>>", self._on_player_shot_selected)
+
+        ctl = tk.Frame(self._player_body, bg=BG_CARD)
+        ctl.pack(fill="x", padx=6, pady=(0, 2))
+        self._player_play_btn = _mk_btn(ctl, "▶", self._player_toggle_play)
+        self._player_play_btn.pack(side="left", padx=(0, 2))
+        _mk_chip(ctl, "↺", self._player_reset).pack(side="left", padx=(0, 4))
+        tk.Label(ctl, text="Speed", bg=BG_CARD, fg=TEXT_DIM,
+                 font=FL).pack(side="left")
+        self._player_speed_var = tk.StringVar(value="1×")
+        speed_combo = ttk.Combobox(
+            ctl, textvariable=self._player_speed_var,
+            values=["0.25×", "0.5×", "1×", "2×", "4×"],
+            state="readonly", width=5, font=FL)
+        speed_combo.pack(side="left", padx=4)
+        speed_combo.bind("<<ComboboxSelected>>", self._on_player_speed)
+
+        scrub = tk.Frame(self._player_body, bg=BG_CARD)
+        scrub.pack(fill="x", padx=6, pady=(0, 4))
+        self._player_pos_var = tk.DoubleVar(value=0.0)
+        self._player_scale = ttk.Scale(
+            scrub, from_=0.0, to=1.0,
+            variable=self._player_pos_var, orient="horizontal",
+            command=self._on_player_scrub)
+        self._player_scale.pack(side="left", fill="x", expand=True)
+        self._player_time_lbl = tk.Label(
+            scrub, text="—", bg=BG_CARD, fg=TEXT_SEC,
+            font=FL, width=10, anchor="e")
+        self._player_time_lbl.pack(side="right", padx=(4, 0))
+
+        self._refresh_player_shot_list()
 
     def _make_tog_btn(self, parent, text, var, col):
         """Create a toggle button that actually works — no closure bug."""
@@ -3665,6 +3817,7 @@ class SeriesReviewWindow(tk.Toplevel):
             self._view_lbl.config(text="○ Saved", fg=TEXT_DIM)
 
         self._rebuild_shot_list()
+        self._refresh_player_shot_list()
         self._update_stats()
         self._redraw()
     def _rebuild_shot_list(self):
@@ -3768,21 +3921,23 @@ class SeriesReviewWindow(tk.Toplevel):
         import cv2
         from PIL import Image, ImageTk
 
-        visible = [s for s in self._view_session.shots
-                   if s.series == self._view_series and not s.deleted]
-
-        img = self._renderer.render(
-            shots=visible,
-            show_mpi=self._show_group.get(),
-            show_group=self._show_group.get(),
-            current_series=self._view_series,
-            show_acp=self._show_acp.get(),
-            show_traces=self._show_traces.get(),
-            show_bbox_shots=self._show_bbox_s.get(),
-            show_bbox_acp=self._show_bbox_a.get(),
-            show_dot_only=self._dot_only.get(),
-            trace_alpha=1.0,  # full brightness in review
-        )
+        if self._player_mode and self._player_shot is not None:
+            img = self._render_player_frame()
+        else:
+            visible = [s for s in self._view_session.shots
+                       if s.series == self._view_series and not s.deleted]
+            img = self._renderer.render(
+                shots=visible,
+                show_mpi=self._show_group.get(),
+                show_group=self._show_group.get(),
+                current_series=self._view_series,
+                show_acp=self._show_acp.get(),
+                show_traces=self._show_traces.get(),
+                show_bbox_shots=self._show_bbox_s.get(),
+                show_bbox_acp=self._show_bbox_a.get(),
+                show_dot_only=self._dot_only.get(),
+                trace_alpha=1.0,  # full brightness in review
+            )
         photo = ImageTk.PhotoImage(
             Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
         if self._tgt_img_id is None:
@@ -3791,6 +3946,202 @@ class SeriesReviewWindow(tk.Toplevel):
         else:
             self._canvas.itemconfig(self._tgt_img_id, image=photo)
         self._canvas._img = photo
+
+    def _toggle_player_mode(self):
+        """Switch between checkbox-driven view and single-shot replay."""
+        self._player_mode = not self._player_mode
+        if self._player_mode:
+            self._player_body.pack(fill="x", padx=0, pady=(0, 4))
+            self._player_mode_btn.configure(text="Play mode: ON")
+            self._refresh_player_shot_list()
+        else:
+            self._player_stop()
+            self._player_body.pack_forget()
+            self._player_mode_btn.configure(text="Play mode: OFF")
+        self._redraw()
+
+    def _refresh_player_shot_list(self):
+        """Refill the shot picker for the currently selected series."""
+        shots = [s for s in self._view_session.shots
+                 if s.series == self._view_series
+                 and s.trace and len(s.trace.points) >= 2]
+        labels = [self._player_shot_label(s) for s in shots]
+        self._player_shot_combo["values"] = labels
+        self._player_shot_indices = {
+            label: s for label, s in zip(labels, shots)
+        }
+        if not labels:
+            self._player_stop()
+            self._player_shot = None
+            self._player_shot_var.set("")
+            self._player_time_lbl.config(text="—")
+            self._player_scale.configure(to=1.0)
+            self._player_pos_var.set(0.0)
+            return
+        # Keep the current selection if still valid; otherwise pick the
+        # first available shot.
+        current = self._player_shot_var.get()
+        if current not in self._player_shot_indices:
+            self._player_shot_var.set(labels[0])
+        self._on_player_shot_selected()
+
+    @staticmethod
+    def _player_shot_label(shot: Shot) -> str:
+        score = shot.score
+        sc = f"{score:.1f}" if score != int(score) else str(int(score))
+        return f"#{shot.index}  {sc} pts"
+
+    def _on_player_shot_selected(self, _event=None):
+        label = self._player_shot_var.get()
+        shot = self._player_shot_indices.get(label)
+        if shot is None:
+            return
+        self._player_stop()
+        self._player_shot = shot
+        duration = self._player_duration(shot.trace)
+        self._player_scale.configure(to=max(duration, 0.001))
+        self._player_pos = 0.0
+        self._player_pos_var.set(0.0)
+        self._update_player_time_label()
+        self._redraw()
+
+    @staticmethod
+    def _player_duration(trace: ShotTrace) -> float:
+        pts = trace.points
+        if len(pts) < 2:
+            return 0.0
+        return max(0.0, pts[-1].timestamp - pts[0].timestamp)
+
+    def _on_player_speed(self, _event=None):
+        text = self._player_speed_var.get().rstrip("×")
+        try:
+            self._player_speed = float(text)
+        except ValueError:
+            self._player_speed = 1.0
+
+    def _on_player_scrub(self, _value=None):
+        if self._player_shot is None:
+            return
+        # Scrubbing implicitly pauses playback so the slider drives the
+        # playhead directly without fighting the timer.
+        if self._player_playing:
+            self._player_stop()
+        self._player_pos = float(self._player_pos_var.get())
+        self._update_player_time_label()
+        self._redraw()
+
+    def _player_toggle_play(self):
+        if self._player_shot is None:
+            return
+        if self._player_playing:
+            self._player_stop()
+            return
+        # If the playhead is at the end, restart from zero.
+        duration = self._player_duration(self._player_shot.trace)
+        if self._player_pos >= duration - 1e-3:
+            self._player_pos = 0.0
+            self._player_pos_var.set(0.0)
+        self._player_playing = True
+        self._player_play_btn.configure(text="❙❙")
+        self._player_last_tick = time.monotonic()
+        self._player_tick()
+
+    def _player_stop(self):
+        self._player_playing = False
+        if self._player_after_id is not None:
+            try:
+                self.after_cancel(self._player_after_id)
+            except Exception:
+                pass
+            self._player_after_id = None
+        if hasattr(self, "_player_play_btn"):
+            self._player_play_btn.configure(text="▶")
+
+    def _player_reset(self):
+        self._player_stop()
+        self._player_pos = 0.0
+        self._player_pos_var.set(0.0)
+        self._update_player_time_label()
+        self._redraw()
+
+    def _player_tick(self):
+        if not self._player_playing or self._player_shot is None:
+            return
+        now = time.monotonic()
+        dt = (now - self._player_last_tick) * self._player_speed
+        self._player_last_tick = now
+        self._player_pos += dt
+        duration = self._player_duration(self._player_shot.trace)
+        if self._player_pos >= duration:
+            self._player_pos = duration
+            self._player_pos_var.set(self._player_pos)
+            self._update_player_time_label()
+            self._redraw()
+            self._player_stop()
+            return
+        self._player_pos_var.set(self._player_pos)
+        self._update_player_time_label()
+        self._redraw()
+        self._player_after_id = self.after(33, self._player_tick)
+
+    def _update_player_time_label(self):
+        if self._player_shot is None:
+            self._player_time_lbl.config(text="—")
+            return
+        duration = self._player_duration(self._player_shot.trace)
+        self._player_time_lbl.config(
+            text=f"{self._player_pos:4.1f} / {duration:4.1f}s")
+
+    def _truncated_trace(self) -> ShotTrace:
+        """Return a trace clipped to the current playhead position."""
+        src = self._player_shot.trace
+        pts = src.points
+        if not pts:
+            return src
+        cutoff = pts[0].timestamp + self._player_pos
+        # Walk the trace and keep points up to the cutoff. The traces
+        # are stored in capture order, so a linear scan is fine; for
+        # very long traces this could be replaced with bisect.
+        kept = []
+        for p in pts:
+            if p.timestamp > cutoff:
+                break
+            kept.append(p)
+        if not kept:
+            kept = [pts[0]]
+        out = ShotTrace(points=kept,
+                         fired_time=src.fired_time,
+                         state=src.state)
+        out.cached_colours = src.cached_colours[:len(kept)]
+        out._cache_params = src._cache_params
+        return out
+
+    def _render_player_frame(self):
+        """Render the target showing only the player's truncated trace."""
+        shot = self._player_shot
+        trace = self._truncated_trace()
+        # Show the shot hole only once playback reaches the firing
+        # moment; before that the shot hasn't happened yet.
+        duration = self._player_duration(shot.trace)
+        reached_fire = self._player_pos >= duration - 1e-3
+        shots_to_render = [shot] if reached_fire else []
+
+        live_aim = trace.points[-1].aim_mm if trace.points else None
+
+        return self._renderer.render(
+            shots=shots_to_render,
+            highlighted_shot_trace=trace,
+            live_aim_mm=live_aim,
+            show_mpi=False,
+            show_group=False,
+            current_series=self._view_series,
+            show_acp=False,
+            show_traces=False,
+            show_bbox_shots=False,
+            show_bbox_acp=False,
+            show_dot_only=self._dot_only.get(),
+            trace_alpha=1.0,
+        )
     def _update_stats(self):
         visible = [s for s in self._view_session.shots
                    if s.series == self._view_series
@@ -3859,6 +4210,7 @@ class SeriesReviewWindow(tk.Toplevel):
             self._view_session.save_csv(out)
 
     def _on_close(self):
+        self._player_stop()
         if self.on_close_refresh:
             self.on_close_refresh()
         self.destroy()
